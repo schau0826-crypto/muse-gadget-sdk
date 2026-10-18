@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,9 +36,13 @@ extern "C" {
 #endif
 
 /*
- * CoreS3 captions have ASCII, symbol, and CJK glyphs. These helpers keep
- * characters without a useful stand-in in UTF-8; curly quotes become straight
- * ones, an em dash "--", and accented letters their plain ones where needed.
+ * The screen's fonts are LVGL's builds of unscii and Montserrat: ASCII, and
+ * Montserrat's symbols. Text from elsewhere (replies, network names) gets
+ * ASCII stand-ins for what they lack: curly quotes become straight ones, an em
+ * dash "--", accented letters their plain ones. Emoji go; anything else stays,
+ * and with CONFIG_MUSE_CJK_FONT the captions draw CJK from a fallback font.
+ * On CoreS3 the captions have ASCII, symbol, and CJK glyphs, so the helpers
+ * below keep characters without a useful stand-in in UTF-8.
  */
 
 /* The Unicode code point at s and its byte length; -1 for malformed UTF-8.
@@ -56,6 +61,20 @@ size_t muse_text_append_utf8(char *dst, size_t cap, const char *src);
 /* The stand-in for the UTF-8 character at s into out, and its length (0 drops
  * the character); -1 to keep it. *len is the character's length in bytes. */
 int muse_text_ascii(const char *s, size_t *len, char out[4]);
+
+/* CJK runs have no spaces, so a caption line may break between their
+ * characters, but not before closing punctuation such as "，" or "。". */
+typedef enum {
+    MUSE_TEXT_NOT_CJK,
+    MUSE_TEXT_CJK,          /* a line may break before or after it */
+    MUSE_TEXT_CJK_CLOSE,    /* closing punctuation: never starts a line */
+} muse_text_cjk_t;
+
+/* What the UTF-8 character at s is, for line breaking. */
+muse_text_cjk_t muse_text_cjk(const char *s);
+
+/* Whether the UTF-8 text s has any CJK in it. */
+bool muse_text_has_cjk(const char *s);
 
 /* Puts the stand-ins into s, which has room for cap bytes. If one doesn't fit,
  * the text ends there. */

@@ -169,9 +169,10 @@ void muse_hatch_tail_words(const char *src, char *out, size_t cap)
 
 /*
  * The next line of `text` wrapped to `cols` characters as the caption shows
- * them in the screen's cells, preferring spaces for English words and keeping
- * CJK closing punctuation off the next line. CJK glyphs use one cell; ASCII
- * stand-ins keep their expanded widths and omitted symbols take no cells.
+ * them in the screen's cells: English words break at spaces, CJK has no
+ * spaces so it breaks between characters but never before closing
+ * punctuation. ASCII stand-ins keep their expanded widths and omitted
+ * symbols take no cells.
  */
 static bool next_line(const char **text, int cols, const char **start, size_t *len)
 {
@@ -242,7 +243,7 @@ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap)
         return false;
     }
     int cols, lines;
-    muse_state_page(&cols, &lines);
+    muse_state_page(muse_text_has_cjk(text), &cols, &lines);
     const char *p = text, *start;
     size_t len;
     int line = -1, n = 0;

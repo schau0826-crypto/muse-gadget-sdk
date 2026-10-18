@@ -13,10 +13,11 @@ ASCII falls back to the existing `lv_font_unscii_16`, so both ASCII and CJK
 characters advance 16 px and the caption's cell-based wrapping stays exact.
 The resulting line height is 20 px; bitmap compression and kerning are off.
 
-This asset is linked only for CoreS3. Its bitmap exceeds LVGL's compact
-descriptor limit, so the CoreS3 overlay enables `LV_FONT_FMT_TXT_LARGE`.
-Do not copy this asset into a smaller app partition without checking the
-linked firmware size.
+The CoreS3 overlay turns on `CONFIG_MUSE_CJK_FONT`, which is what links this
+file into the build (and what upstream's `muse_ui.c` and `muse_text.c` use as
+the caption fallback). Its bitmap exceeds LVGL's compact descriptor limit, so
+the CoreS3 overlay also enables `LV_FONT_FMT_TXT_LARGE`. Do not copy this
+asset into a smaller app partition without checking the linked firmware size.
 
 Pinned upstream source:
 <https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf>
@@ -34,3 +35,14 @@ Regenerate from `esp32/` (the converter can be installed locally with
 LV_FONT_CONV=/path/to/font-tools/node_modules/.bin/lv_font_conv \
   bash tools/muse/generate_cjk_font.sh /path/to/NotoSansCJKsc-Regular.otf
 ```
+
+## Upstream alternative
+
+Upstream builds the same file name from **GNU Unifont 16.0.04** with
+`tools/muse/gen_cjk_font.sh`: 1 bpp, about 850 KB of flash, covering CJK
+punctuation, kana, U+4E00–U+9FFF and the fullwidth forms. This branch ships
+the Noto version instead (larger, 2 bpp, better for a 19-column reading page);
+running the upstream script replaces this file with the Unifont build. GNU
+Unifont is by Roman Czyborra, Paul Hardy and contributors
+(<https://unifoundry.com/unifont/>), under the SIL Open Font License 1.1 and
+the GNU GPL v2+ with the font embedding exception.

@@ -61,11 +61,20 @@ def sdk_token(directory: Path | None = None) -> str | None:
     return token
 
 
+def sdk_token_hint(token: str | None) -> str:
+    """The part of an SDK token gadgets.muse.ai shows, or "none" without a token."""
+    return token[:12] if token else "none"
+
+
 def load_json(name: str, directory: Path | None = None) -> dict | None:
     path = (directory or state_dir()) / name
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except PermissionError:
+        # Not the same as a missing file: identity.load_or_create() would
+        # otherwise mint a new identity over one it merely can't read.
+        raise
+    except (OSError, ValueError):  # ValueError covers bad JSON and bad UTF-8
         return None
     return data if isinstance(data, dict) else None
 
