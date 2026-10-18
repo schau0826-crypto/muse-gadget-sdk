@@ -16,6 +16,11 @@ limitations under the License.
 
 # Muse Gadgets
 
+> **This fork:** the `cores3-zh` branch adds a Chinese reading UI, an offline
+> Noto CJK font, MiMo TTS and caption streaming to the M5Stack CoreS3. It
+> tracks upstream `main` and publishes flashable builds on `zh-v*` tags. See
+> [docs/cores3-zh.md](docs/cores3-zh.md) (中文).
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/images/muse-gadgets-dark.png">
