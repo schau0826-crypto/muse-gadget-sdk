@@ -1,0 +1,58 @@
+# Build the CoreS3 Chinese custom firmware.
+#
+# Pushes to cores3-zh build and keep the flashable files as an artifact.
+# Tags named zh-v* also publish them as a GitHub Release.
+name: CoreS3 Chinese firmware
+
+on:
+  push:
+    branches: [cores3-zh]
+    tags: ['zh-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build CoreS3 (zh)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0.1
+    defaults:
+      run:
+        shell: bash
+        working-directory: esp32
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py -B build-muse-m5stack-cores3 -DIDF_TARGET=esp32s3 \
+            -DSDKCONFIG=build-muse-m5stack-cores3/sdkconfig \
+            -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-m5stack-cores3' \
+            build
+
+      - name: Collect flash files
+        run: |
+          mkdir -p out
+          cp build-muse-m5stack-cores3/muse-gadget.bin out/
+          cp build-muse-m5stack-cores3/bootloader/bootloader.bin out/
+          cp build-muse-m5stack-cores3/partition_table/partition-table.bin out/
+          cp build-muse-m5stack-cores3/ota_data_initial.bin out/ 2>/dev/null || true
+          cp build-muse-m5stack-cores3/flash_args out/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cores3-zh-firmware
+          path: esp32/out/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/zh-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: esp32/out/*
+          generate_release_notes: true
