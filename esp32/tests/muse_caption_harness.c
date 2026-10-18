@@ -28,8 +28,9 @@
 static int s_cols = 16;
 static int s_lines = 2;
 
-void muse_state_page(int *cols, int *lines)
+void muse_state_page(bool cjk, int *cols, int *lines)
 {
+    (void)cjk;
     *cols = s_cols;
     *lines = s_lines;
 }

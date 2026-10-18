@@ -275,7 +275,7 @@ muse_text_cjk_t muse_text_cjk(const char *s)
         0xFF3D, 0xFF5D, 0xFF60,
     };
     size_t len;
-    int32_t cp = decode((const unsigned char *)s, &len);
+    int32_t cp = muse_text_codepoint(s, &len);
     for (size_t i = 0; i < sizeof(CLOSE) / sizeof(CLOSE[0]); i++) {
         if (cp == CLOSE[i]) {
             return MUSE_TEXT_CJK_CLOSE;
@@ -295,7 +295,7 @@ bool muse_text_has_cjk(const char *s)
             return true;
         }
         size_t len;
-        decode((const unsigned char *)s, &len);
+        muse_text_codepoint(s, &len);
         s += len;
     }
     return false;
