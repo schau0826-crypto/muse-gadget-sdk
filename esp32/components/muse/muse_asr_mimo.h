@@ -36,6 +36,10 @@ bool muse_asr_init(void);
  * valid until the next call, or NULL when it failed. */
 const char *muse_asr_transcribe(const int16_t *pcm, size_t samples);
 
+/* The HTTP status of the last transcribe(), or -1 if it never got that far.
+ * 402 means the MiMo account is out of credit. */
+int muse_asr_last_status(void);
+
 #ifdef __cplusplus
 }
 #endif

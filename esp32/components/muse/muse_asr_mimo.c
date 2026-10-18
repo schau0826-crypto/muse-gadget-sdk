@@ -63,6 +63,7 @@ static char *s_rx;
 static char *s_text;
 static size_t s_json_cap;
 static bool s_ready;
+static int s_status = -1;   /* HTTP status of the last request */
 
 static void *psram(size_t n)
 {
@@ -131,6 +132,7 @@ const char *muse_asr_transcribe(const int16_t *pcm, size_t samples)
     if (!s_ready || !pcm || !samples) {
         return NULL;
     }
+    s_status = -1;
     size_t bytes = samples * 2;
     if (bytes > ASR_MAX_BYTES) {
         bytes = ASR_MAX_BYTES;
@@ -197,6 +199,7 @@ const char *muse_asr_transcribe(const int16_t *pcm, size_t samples)
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
+    s_status = status;
     if (status != 200) {
         ESP_LOGW(TAG, "HTTP %d: %.200s", status, s_rx[0] ? s_rx : "(no body)");
         return NULL;
@@ -222,4 +225,9 @@ const char *muse_asr_transcribe(const int16_t *pcm, size_t samples)
         ESP_LOGW(TAG, "no text in response");
     }
     return text;
+}
+
+int muse_asr_last_status(void)
+{
+    return s_status;
 }

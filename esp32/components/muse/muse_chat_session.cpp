@@ -1273,7 +1273,11 @@ static bool record_note_asr(void)
     const char *heard = muse_asr_transcribe(reinterpret_cast<const int16_t *>(s_turn.asr_pcm),
                                             s_turn.asr_bytes / 2);
     if (!heard || !*heard) {
-        turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
+        if (muse_asr_last_status() == 402) {
+            turn_fail(MUSE_TR("MIMO ACCOUNT OUT OF CREDIT", "MiMo 余额不足"));
+        } else {
+            turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
+        }
         return true;
     }
     post_chat(heard);

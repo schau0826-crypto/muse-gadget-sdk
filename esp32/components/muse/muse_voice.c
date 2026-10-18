@@ -528,6 +528,14 @@ static void back_off(void)
 /* Saves the note just recorded to send later. `tried`: Hatch failed it, so it waits out the backoff. */
 static void hold_rec(bool tried)
 {
+#if CONFIG_MUSE_MIMO_ASR
+    /* MiMo ASR already handled this press in the chat session; saving it
+     * would only retry the same failing ASR on every send attempt. */
+    drop_rec();
+    go_idle(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
+    (void)tried;
+    return;
+#endif
     if (s_held_count >= HELD_MAX) {   /* can_record() leaves room: not expected */
         drop_rec();
         go_idle(MUSE_TR("COULDN'T SAVE THE NOTE", "语音保存失败"));
@@ -636,6 +644,15 @@ static bool wait_delivered(void)
  */
 static bool send_held(bool quiet)
 {
+#if CONFIG_MUSE_MIMO_ASR
+    /* Notes saved before ASR was on (or by an older build) can't be
+     * transcribed again here; drop them instead of retrying forever. */
+    while (s_held_count) {
+        drop_oldest();
+    }
+    (void)quiet;
+    return false;
+#endif
     held_note_t *h = &s_held[0];
     ESP_LOGI(TAG, "sending a saved note%s: %.1fs, from %llds ago, try %d", quiet ? " (asleep)" : "",
              (double)h->frames / MUSE_AUDIO_RATE, (long long)((esp_timer_get_time() - h->at_us) / 1000000),
