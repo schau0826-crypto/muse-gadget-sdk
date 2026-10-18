@@ -43,6 +43,9 @@
 #include "muse_settings_ui.h"
 #include "muse_state.h"
 #include "muse_wifi.h"
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+LV_FONT_DECLARE(muse_font_cjk_16);
+#endif
 #if CONFIG_MUSE_WATCHER_CAMERA
 #include "boards/watcher_camera.h"
 #endif
@@ -447,6 +450,15 @@ static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compac
     return s_small ? compact : full;
 }
 
+static const lv_font_t *caption_font(void)
+{
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+    return &muse_font_cjk_16;
+#else
+    return font_pick(&lv_font_unscii_16, &lv_font_unscii_8);
+#endif
+}
+
 static lv_obj_t *make_label(lv_obj_t *parent, const lv_font_t *font, uint32_t color)
 {
     lv_obj_t *l = lv_label_create(parent);
@@ -588,7 +600,7 @@ static void set_answer(int which)
             lv_obj_add_flag(l->hides[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
-    if (!muse_board->round) {
+    if (s_ring && !muse_board->round) {
         lv_obj_set_flag(s_ring, LV_OBJ_FLAG_HIDDEN, l != NULL);   /* the reply runs past a rectangle's ring */
     }
     if (l) {
@@ -649,6 +661,37 @@ static void add_hides(answer_layout_t *l, int n)
         }
     }
 }
+
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+/* The landscape screen needs a reading page, rather than the tiny screen's
+ * two 8px caption rows. Keep the 64px avatar above five 16px text rows and
+ * leave the touch-navigation dots clear. Chinese and Unscii both advance 16px. */
+static void build_cores3_answer(lv_obj_t *face)
+{
+    const lv_font_t *font = caption_font();
+    int cw = lv_font_get_glyph_width(font, 'M', ' ');
+    int pitch = lv_font_get_line_height(font) + CAPTION_LINE_SPACE;
+    int top = 104 - s_h / 2;
+    int lines = (reply_bottom(s_w - 16, 0) - top + CAPTION_LINE_SPACE) / pitch;
+    answer_layout_t *l = &s_answers[ANSWER_READ];
+    l->px = MUSE_PX_W;
+    l->y = 28 + l->px / 2 - s_h / 2;
+    l->align = LV_TEXT_ALIGN_LEFT;
+    set_reply_box(l, (s_w - 16) / cw, lines > 0 ? lines : 1, top, cw, pitch);
+    l->hides[0] = s_state_lbl;
+    l->hides[1] = s_name_lbl;
+    add_hides(l, 2);
+    /* The SDK currently displays text at reading pace, even with Speaker on. */
+    s_answers[ANSWER_HEARD] = *l;
+    s_reply_lbl = make_label(face, font, COLOR_CAPTION);
+    lv_obj_set_style_text_line_space(s_reply_lbl, CAPTION_LINE_SPACE, 0);
+    lv_obj_set_style_text_letter_space(s_reply_lbl, 0, 0);
+    lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
+    ESP_LOGI(TAG, "CoreS3 reply pages: %d columns, %d lines", l->cols, l->lines);
+}
+#endif
 
 /*
  * The answer layouts, both with Muse centred. Heard: Muse a size smaller,
@@ -869,11 +912,15 @@ static void build_screen(void)
      * these rows, so there's nowhere to put this without covering the face. */
     lv_obj_set_flag(s_name_lbl, LV_OBJ_FLAG_HIDDEN, s_small && !s_tall && s_h < 200);
 
-    s_caption_lbl = make_label(face, font_pick(&lv_font_unscii_16, &lv_font_unscii_8), COLOR_CAPTION);
+    s_caption_lbl = make_label(face, caption_font(), COLOR_CAPTION);
     if (s_small) {
         /* Two lines over the bottom of the face, on a dark band so they stay
          * legible. A tall screen has room to keep them above the mic icon. */
-        lv_obj_set_size(s_caption_lbl, s_w, 2 * 8 + 2 + 4);
+        int caption_h = 2 * lv_font_get_line_height(caption_font()) + 2 + 4;
+        lv_obj_set_size(s_caption_lbl, s_w, caption_h);
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+        lv_obj_set_width(s_caption_lbl, s_w - 16);
+#endif
         lv_obj_set_style_pad_ver(s_caption_lbl, 2, 0);
         lv_obj_set_style_text_line_space(s_caption_lbl, 2, 0);
         lv_obj_set_style_bg_color(s_caption_lbl, lv_color_black(), 0);
@@ -887,6 +934,9 @@ static void build_screen(void)
         lv_obj_set_size(s_bar, 0, 3);
         lv_obj_set_style_bg_opa(s_bar, LV_OPA_COVER, 0);
         lv_obj_align(s_bar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+        build_cores3_answer(face);
+#endif
         return;
     }
     /* Fixed height: a longer caption ends in dots rather than growing into the ring. */

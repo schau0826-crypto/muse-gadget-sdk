@@ -56,6 +56,17 @@ size_t muse_hatch_base64(const uint8_t *in, size_t n, char *out);
 void muse_hatch_tail_words(const char *src, char *out, size_t cap);
 bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap);
 
+/* A Markdown reply as plain text: what the screen shows (links as their
+ * text, bare URLs as their host) or, with `speech`, what TTS reads (no URLs
+ * or code blocks). Returns the length written to out. */
+size_t muse_hatch_plain_text(const char *src, char *out, size_t cap, bool speech);
+/* How long text takes to say, in rough units: a Hanzi is 6, a Latin letter or
+ * digit 2, a pause at punctuation 3. MUSE_HATCH_UNITS_PER_S is spoken pace. */
+#define MUSE_HATCH_UNITS_PER_S 29
+size_t muse_hatch_speech_units(const char *text);
+/* The byte offset in text where `units` of speech have been said. */
+size_t muse_hatch_units_offset(const char *text, size_t units);
+
 #ifdef __cplusplus
 }
 #endif

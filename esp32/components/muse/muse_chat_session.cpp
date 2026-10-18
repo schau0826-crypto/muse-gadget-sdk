@@ -69,6 +69,8 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_text.h"
+#include "muse_tts_mimo.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -98,9 +100,9 @@ static const char *TAG = "muse_chat_session";
 #define IN_BYTES (MIC_RATE * 2 * 8)        /* 8 s of mic backlog while connecting */
 #define OUT_BYTES (MIC_RATE * 2 * 2)       /* 2 s of decoded reply */
 #define EV_TEXT 72
-#define TEXT_MAX 1024                      /* a message's text, for captions timed to its speech */
-#define SPEECH_CHARS_PER_S 14              /* until the speech's length is known */
-#define TEXT_CHARS_PER_S 16                /* speaker off: reading pace, a little over speech */
+#define TEXT_MAX 4096                      /* a message's text in PSRAM for multi-line CJK captions */
+#define TEXT_BYTES_PER_S 16                /* about 5.3 Hanzi/s at the existing reading pace */
+#define TEXT_UNITS_PER_S 32                /* the same pace in muse_hatch_speech_units */
 #define TEXT_HOLD_S 2                      /* speaker off: how long a message's last lines stay up */
 
 #define PING_US (20 * 1000000LL)
@@ -196,12 +198,13 @@ enum tts_t : uint8_t { TTS_NONE, TTS_QUEUED, TTS_ACTIVE, TTS_FINISHED };
 
 struct msg_t {
     char id[80];
-    size_t len;              /* reply text length so far */
-    char tail[128];          /* its last characters, for the caption */
+    size_t len;              /* reply text length so far, in UTF-8 bytes */
+    char tail[128];          /* its last UTF-8 characters, for the caption */
     bool done;
     tts_t tts;
     uint32_t pcm_start;      /* where its speech starts in the reply audio */
     uint32_t pcm_frames;     /* how long it is; 0 until the MP3 has all arrived */
+    uint32_t pcm_made;       /* until then, how much speech there is so far */
 };
 
 struct resampler_t {
@@ -225,7 +228,8 @@ struct turn_t {
     size_t note_len;
     size_t pcm_bytes;        /* the note so far */
     size_t body_sent;
-    char *texts;             /* MAX_MSGS * TEXT_MAX: each message's text */
+    char *texts;             /* MAX_MSGS * TEXT_MAX: each message's text as shown */
+    char *raw;               /* MAX_MSGS * TEXT_MAX: and as it came, in Markdown */
     uint32_t pcm_out;        /* reply audio frames handed to the voice task */
     char committed[512];     /* finals that arrived before the half-close */
     char partial[512];
@@ -236,6 +240,7 @@ struct turn_t {
     /* TTS */
     int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
     bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
+    uint32_t tts_job;        /* MiMo TTS job speaking tts_msg, or 0 */
     uint8_t *mp3;            /* MP3_BUF */
     size_t mp3_len;
     bool mp3_ended;
@@ -260,6 +265,7 @@ static bool open_note(void);
 static void log_marks(void);
 static int16_t *s_pcm;       /* MINIMP3_MAX_SAMPLES_PER_FRAME */
 static int16_t *s_pcm16;     /* resampled output */
+static char *s_plain;        /* TEXT_MAX: a message made plain, on the session task */
 static int64_t s_last_seq;
 
 static int64_t now_us(void)
@@ -310,7 +316,7 @@ static void emit(muse_hatch_ev_t type, const char *text)
     if (type == MUSE_HATCH_EV_HEARD) {
         muse_hatch_tail_words(text ? text : "", ev.text, sizeof(ev.text));
     } else if (text) {
-        strlcpy(ev.text, text, sizeof(ev.text));
+        muse_text_copy_utf8(ev.text, sizeof(ev.text), text);
     }
     /* Captions are lossy; the end of a turn, and whether the note got there, must get through. */
     TickType_t wait = (type == MUSE_HATCH_EV_DONE || type == MUSE_HATCH_EV_ERROR || type == MUSE_HATCH_EV_SENT)
@@ -952,6 +958,10 @@ static void turn_reset_streams(void)
 static void turn_finish(void)
 {
     turn_reset_streams();
+    if (s_turn.tts_job) {
+        muse_tts_stop();
+        s_turn.tts_job = 0;
+    }
     s_turn.phase = P_IDLE;
     s_turn.dict_id = s_turn.chat_id = 0;
     s_turn.tts_msg = -1;
@@ -985,18 +995,19 @@ static bool turn_start(uint32_t gen, bool text)
 {
     if (s_turn.phase != P_IDLE) {
         if (s_turn.text) {
-            turn_fail("INTERRUPTED");
+            turn_fail(MUSE_TR("INTERRUPTED", "已中断"));
         } else {
             turn_finish();
         }
     }
     uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note;
-    char *texts = s_turn.texts;
+    char *texts = s_turn.texts, *raw = s_turn.raw;
     s_turn = turn_t{};
     s_turn.chunk = chunk;
     s_turn.mp3 = mp3;
     s_turn.note = note;
     s_turn.texts = texts;
+    s_turn.raw = raw;
     s_turn.gen = gen;
     s_turn.text = text;
     s_turn.tts_msg = -1;
@@ -1005,7 +1016,8 @@ static bool turn_start(uint32_t gen, bool text)
     s_turn.start_us = now_us();
     resampler_init(&s_turn.up, MIC_RATE, DICT_RATE);
     if (!ensure_connected()) {
-        turn_fail(muse_hatch_configured() ? "CAN'T REACH MUSE" : "MUSE NOT SET UP");
+        turn_fail(muse_hatch_configured() ? MUSE_TR("CAN'T REACH MUSE", "连不上 Muse")
+                                          : MUSE_TR("MUSE NOT SET UP", "Muse 尚未配对"));
         return false;
     }
     return true;
@@ -1019,7 +1031,7 @@ static void turn_begin(uint32_t gen)
     if (VOICE_NOTE) {
         if (!open_note()) {
             disconnect("chat open failed");
-            turn_fail("CAN'T REACH MUSE");
+            turn_fail(MUSE_TR("CAN'T REACH MUSE", "连不上 Muse"));
             return;
         }
         s_turn.phase = P_LISTEN;
@@ -1030,7 +1042,7 @@ static void turn_begin(uint32_t gen)
     s_turn.dict_id = open_stream(K_DICT, "POST", path, nullptr, "application/x-ndjson", nullptr, false);
     if (!s_turn.dict_id) {
         disconnect("dictation open failed");
-        turn_fail("CAN'T REACH MUSE");
+        turn_fail(MUSE_TR("CAN'T REACH MUSE", "连不上 Muse"));
         return;
     }
     s_turn.phase = P_LISTEN;
@@ -1149,7 +1161,7 @@ static bool record_note(void)
     mark(M_RELEASE);
     double secs = (double)s_turn.pcm_bytes / (MIC_RATE * 2);
     if (secs < 0.3) {
-        turn_fail("DIDN'T CATCH THAT");   /* resets the half-sent request */
+        turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));   /* resets the half-sent request */
         return true;
     }
     if (!send_note_part(true)) {
@@ -1187,7 +1199,7 @@ static void send_chat(const char *text, const char *modality)
     cJSON_free(json);
     if (!ok) {
         disconnect("chat/stream failed");
-        turn_fail("CAN'T REACH MUSE");
+        turn_fail(MUSE_TR("CAN'T REACH MUSE", "连不上 Muse"));
         return;
     }
     s_turn.body_sent = len;
@@ -1207,7 +1219,7 @@ static void post_chat(const char *text)
         text++;
     }
     if (!*text) {
-        turn_fail("DIDN'T CATCH THAT");
+        turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
         return;
     }
     ESP_LOGI(TAG, "heard: \"%s\"", text);
@@ -1266,7 +1278,8 @@ static void on_dictation_end(bool ok)
         return;
     }
     if (!s_turn.end_sent) {
-        turn_fail(ok ? "MUSE STOPPED LISTENING" : "MUSE COULDN'T LISTEN");
+        turn_fail(ok ? MUSE_TR("MUSE STOPPED LISTENING", "Muse 停止了收听")
+                     : MUSE_TR("MUSE COULDN'T LISTEN", "Muse 无法收听"));
         return;
     }
     char heard[1024];
@@ -1320,22 +1333,35 @@ static void append_text(msg_t &m, const char *text)
     size_t add = strlen(text);
     if (s_turn.texts) {
         char *full = s_turn.texts + (&m - s_turn.msgs) * TEXT_MAX;
+        char *raw = s_turn.raw ? s_turn.raw + (&m - s_turn.msgs) * TEXT_MAX : full;
         if (!m.len) {
-            full[0] = '\0';
+            raw[0] = '\0';
         }
-        strlcat(full, text, TEXT_MAX);
+        muse_text_append_utf8(raw, TEXT_MAX, text);
+        if (raw != full && s_plain) {
+            /* Shown without its Markdown, redone as it grows: marks and links arrive in pieces. */
+            size_t n = muse_hatch_plain_text(raw, s_plain, TEXT_MAX, false);
+            memcpy(full, s_plain, n + 1);
+        }
     }
     m.len += add;
     size_t have = strlen(m.tail);
     if (add >= sizeof(m.tail) - 1) {
-        strlcpy(m.tail, text + add - (sizeof(m.tail) - 1), sizeof(m.tail));
+        const char *suffix = text + add - (sizeof(m.tail) - 1);
+        while (*suffix && ((unsigned char)*suffix & 0xC0) == 0x80) {
+            suffix++;
+        }
+        muse_text_copy_utf8(m.tail, sizeof(m.tail), suffix);
         return;
     }
     if (have + add >= sizeof(m.tail)) {
         size_t drop = have + add - (sizeof(m.tail) - 1);
+        while (drop < have && ((unsigned char)m.tail[drop] & 0xC0) == 0x80) {
+            drop++;
+        }
         memmove(m.tail, m.tail + drop, have - drop + 1);
     }
-    strlcat(m.tail, text, sizeof(m.tail));
+    muse_text_append_utf8(m.tail, sizeof(m.tail), text);
 }
 
 /*
@@ -1375,7 +1401,7 @@ static void message_done(int i, const char *final_text)
             muse_hatch_console("final", final_text, "\"msg\":%d", i);
         }
         muse_hatch_console("message_done", nullptr, "\"msg\":%d,\"bytes\":%u", i, (unsigned)n);
-        ESP_LOGI(TAG, "message %s done (%u chars)", m.id, (unsigned)n);
+        ESP_LOGI(TAG, "message %s done (%u bytes)", m.id, (unsigned)n);
         return;
     }
     if (!m.len && final_text && final_text[0]) {
@@ -1384,7 +1410,7 @@ static void message_done(int i, const char *final_text)
     if (m.len && m.tts == TTS_NONE) {
         m.tts = TTS_QUEUED;
     }
-    ESP_LOGI(TAG, "message %s done (%u chars)", m.id, (unsigned)m.len);
+    ESP_LOGI(TAG, "message %s done (%u bytes)", m.id, (unsigned)m.len);
 }
 
 static const char *msg_id(cJSON *payload, cJSON *event)
@@ -1492,6 +1518,21 @@ static void on_chat_ack(stream_t *s)
 
 /* ---- Turn: speech ---- */
 
+/* Shows message i at reading pace, timed by silence. */
+static void show_silently(int i)
+{
+    msg_t &m = s_turn.msgs[i];
+    m.pcm_start = s_turn.pcm_out;
+    m.pcm_frames = s_turn.texts
+                       ? (uint32_t)(muse_hatch_speech_units(s_turn.texts + i * TEXT_MAX) * MIC_RATE / TEXT_UNITS_PER_S)
+                       : (uint32_t)(m.len * MIC_RATE / TEXT_BYTES_PER_S);
+    m.tts = TTS_ACTIVE;
+    s_turn.tts_msg = i;
+    s_turn.silent = true;
+    ESP_LOGI(TAG, "showing message %s (%u bytes)", m.id, (unsigned)m.len);
+    show_reply_start(m);
+}
+
 static void start_tts(void)
 {
     if (s_turn.tts_msg >= 0) {
@@ -1501,6 +1542,31 @@ static void start_tts(void)
         msg_t &m = s_turn.msgs[i];
         if (m.tts != TTS_QUEUED) {
             continue;
+        }
+        /* Speaker on and a MiMo key built in: speak it, streaming, without
+         * its URLs and code (an empty result is just shown). */
+        uint32_t job = 0;
+        if (muse_settings_speaker_on() && s_turn.texts) {
+            const char *said = s_turn.texts + i * TEXT_MAX;
+            if (s_turn.raw && s_plain) {
+                muse_hatch_plain_text(s_turn.raw + i * TEXT_MAX, s_plain, TEXT_MAX, true);
+                said = s_plain;
+            }
+            job = muse_tts_speak(said);
+        }
+        if (job) {
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            m.pcm_made = 0;
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.tts_job = job;
+            s_turn.silent = false;
+            resampler_init(&s_turn.down, MUSE_TTS_RATE, MIC_RATE);
+            mark(M_TTS);
+            ESP_LOGI(TAG, "speaking message %s (%u bytes)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            return;
         }
         /*
          * Replies are text, shown at reading pace: silence in place of speech
@@ -1517,15 +1583,51 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
-        m.pcm_start = s_turn.pcm_out;
-        m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
-        m.tts = TTS_ACTIVE;
-        s_turn.tts_msg = i;
-        s_turn.silent = true;
-        ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
-        show_reply_start(m);
+        show_silently(i);
         return;
     }
+}
+
+/* Plays the MiMo job's PCM while the reply buffer has room. */
+static void pump_tts(void)
+{
+    const size_t in_max = MINIMP3_MAX_SAMPLES_PER_FRAME;   /* s_pcm's size; resamples to fewer */
+    msg_t &m = s_turn.msgs[s_turn.tts_msg];
+    muse_tts_state_t state = MUSE_TTS_PENDING;
+    while (xStreamBufferSpacesAvailable(s_out) >= (in_max + 8) * sizeof(int16_t)) {
+        size_t got = muse_tts_read(s_turn.tts_job, s_pcm, in_max, &state);
+        if (!got) {
+            break;
+        }
+        size_t n = resample(&s_turn.down, s_pcm, got, s_pcm16);
+        if (s_turn.gen == s_gen.load()) {
+            mark(M_AUDIO);
+            xStreamBufferSend(s_out, s_pcm16, n * sizeof(int16_t), 0);
+        }
+        s_turn.pcm_out += n;
+    }
+    /* The captions pace themselves by how long the speech is: known exactly
+     * once MiMo has made all of it, well before it has all been played. */
+    bool all;
+    uint32_t made = (uint32_t)((uint64_t)muse_tts_generated(s_turn.tts_job, &all) * MIC_RATE / MUSE_TTS_RATE);
+    if (all) {
+        m.pcm_frames = made;
+    } else {
+        m.pcm_made = made;
+    }
+    if (state == MUSE_TTS_PENDING) {
+        return;
+    }
+    int i = s_turn.tts_msg;
+    s_turn.tts_job = 0;
+    if (s_turn.pcm_out == m.pcm_start) {
+        ESP_LOGW(TAG, "no speech for message %s; showing it instead", m.id);
+        show_silently(i);
+        return;
+    }
+    m.pcm_frames = s_turn.pcm_out - m.pcm_start;
+    m.tts = TTS_FINISHED;
+    s_turn.tts_msg = -1;
 }
 
 static void tts_data(const uint8_t *data, size_t len)
@@ -1580,6 +1682,10 @@ static void decode(void)
     }
     if (s_turn.silent) {
         pace_silently();
+        return;
+    }
+    if (s_turn.tts_job) {
+        pump_tts();
         return;
     }
     /*
@@ -1658,7 +1764,7 @@ static void check_turn(void)
     if (!s_turn.nmsgs) {
         /* A typed turn waits as long as the agent says it's working. */
         if (t - s_turn.chat_us > (text ? TEXT_REPLY_TIMEOUT_US : REPLY_TIMEOUT_US) && !(text && s_turn.agent_busy)) {
-            turn_fail("NO REPLY FROM MUSE");
+            turn_fail(MUSE_TR("NO REPLY FROM MUSE", "Muse 没有回复"));
         }
         return;
     }
@@ -1765,7 +1871,7 @@ static bool stream_end(stream_t *s, bool ok)
         close_stream(s);
         s_turn.chat_id = 0;
         if (!ok) {
-            turn_fail("MUSE DIDN'T TAKE IT");
+            turn_fail(MUSE_TR("MUSE DIDN'T TAKE IT", "Muse 没有收到"));
         }
         break;
     case K_TTS:
@@ -1867,7 +1973,7 @@ static void drop_connection(const char *why)
     disconnect(why);
     s_auto_next_us = now_us() + s_auto_backoff_us;
     if (in_turn) {
-        turn_fail("LOST CONNECTION TO MUSE");
+        turn_fail(MUSE_TR("LOST CONNECTION TO MUSE", "与 Muse 的连接断开"));
     }
     muse_hatch_report(MUSE_HATCH_UNTESTED, "");
 }
@@ -1883,7 +1989,7 @@ static void handle(const cmd_t &cmd)
         break;
     case CMD_FORGET:
         if (s_turn.phase != P_IDLE) {
-            turn_fail("SETTINGS CHANGED");
+            turn_fail(MUSE_TR("SETTINGS CHANGED", "设置已更改"));
         }
         disconnect("settings changed");
         forget_vm();
@@ -1916,7 +2022,7 @@ static void handle(const cmd_t &cmd)
         break;
     case CMD_TEXT_CANCEL:
         if (s_turn.text && s_turn.phase != P_IDLE) {
-            turn_fail("CANCELLED");
+            turn_fail(MUSE_TR("CANCELLED", "已取消"));
         }
         break;
     case CMD_WAKE:   /* only ends hatch_task's resting wait */
@@ -2031,6 +2137,8 @@ extern "C" void muse_hatch_start(void)
     s_turn.mp3 = static_cast<uint8_t *>(psram_alloc(MP3_BUF));
     s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
     s_turn.texts = static_cast<char *>(psram_alloc(MAX_MSGS * TEXT_MAX));   /* captions just stay untimed without it */
+    s_turn.raw = static_cast<char *>(psram_alloc(MAX_MSGS * TEXT_MAX));     /* Markdown shows as it came without it */
+    s_plain = static_cast<char *>(psram_alloc(TEXT_MAX));
     s_pcm = static_cast<int16_t *>(psram_alloc(MINIMP3_MAX_SAMPLES_PER_FRAME * sizeof(int16_t)));
     s_pcm16 = static_cast<int16_t *>(psram_alloc((MINIMP3_MAX_SAMPLES_PER_FRAME + 8) * sizeof(int16_t)));
     for (auto &s : s_streams) {
@@ -2044,6 +2152,7 @@ extern "C" void muse_hatch_start(void)
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "start failed");
     }
+    muse_tts_init();
 }
 
 extern "C" void muse_hatch_chat_connect(void)
@@ -2125,7 +2234,7 @@ extern "C" muse_hatch_ev_t muse_hatch_turn_event(char *text, size_t cap)
     ev_t ev;
     while (xQueueReceive(s_events, &ev, 0) == pdTRUE) {
         if (ev.gen == s_gen.load()) {
-            strlcpy(text, ev.text, cap);
+            muse_text_copy_utf8(text, cap, ev.text);
             return ev.type;
         }
     }
@@ -2153,12 +2262,29 @@ extern "C" bool muse_hatch_turn_caption(size_t played, char *out, size_t cap)
         }
         return false;
     }
-    size_t len = strlen(text);
-    uint32_t frames = m->pcm_frames ? m->pcm_frames : (uint32_t)(len * MIC_RATE / SPEECH_CHARS_PER_S);
-    size_t at = frames ? (size_t)((uint64_t)(played - m->pcm_start) * len / frames) : 0;
+    /* Where the speech has got to, by how long each character takes to say:
+     * Hanzi take longer than Latin letters, and punctuation adds a pause. */
+    size_t len = strlen(text), units = muse_hatch_speech_units(text);
+    uint32_t frames = m->pcm_frames;
+    if (!frames) {
+        frames = (uint32_t)(units * MIC_RATE / MUSE_HATCH_UNITS_PER_S);
+        frames = frames > m->pcm_made ? frames : m->pcm_made;
+    }
+    size_t at = units && frames ? muse_hatch_units_offset(text, (size_t)((uint64_t)(played - m->pcm_start) * units / frames))
+                                : (frames ? (size_t)((uint64_t)(played - m->pcm_start) * len / frames) : 0);
     if (at >= len) {
         at = len ? len - 1 : 0;
     }
+    /* A longer estimate never scrolls the captions back. */
+    static const msg_t *s_for;
+    static uint32_t s_for_gen;
+    static size_t s_at;
+    if (m == s_for && s_turn.gen == s_for_gen && at < s_at) {
+        at = s_at;
+    }
+    s_for = m;
+    s_for_gen = s_turn.gen;
+    s_at = at;
 
     return muse_hatch_caption_at(text, at, out, cap);
 }

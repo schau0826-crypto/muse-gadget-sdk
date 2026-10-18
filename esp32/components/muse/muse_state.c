@@ -115,6 +115,7 @@ void muse_state_set_caption(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    muse_text_copy_utf8(buf, sizeof(buf), buf);   /* vsnprintf may stop in a CJK character */
     muse_text_to_ascii(buf, sizeof(buf));   /* replies have curly quotes and dashes */
 
     portENTER_CRITICAL(&s_lock);
@@ -131,7 +132,7 @@ bool muse_state_caption(char *out, size_t out_len, uint32_t *version)
     bool changed = false;
     portENTER_CRITICAL(&s_lock);
     if (*version != s_caption_version) {
-        strlcpy(out, s_caption, out_len);
+        muse_text_copy_utf8(out, out_len, s_caption);
         *version = s_caption_version;
         changed = true;
     }

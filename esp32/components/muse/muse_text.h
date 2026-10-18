@@ -17,17 +17,41 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
+
+#if __has_include("sdkconfig.h")   /* not in host tests */
+#include "sdkconfig.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Status captions in Chinese on boards whose caption font has Hanzi. */
+#if CONFIG_MUSE_BOARD_M5STACK_CORES3
+#define MUSE_TR(en, zh) zh
+#else
+#define MUSE_TR(en, zh) en
+#endif
+
 /*
- * The screen's fonts are LVGL's builds of unscii and Montserrat: ASCII, and
- * Montserrat's symbols. Text from elsewhere (replies, network names) gets
- * ASCII stand-ins for what they lack: curly quotes become straight ones, an em
- * dash "--", accented letters their plain ones. Emoji go; anything else stays.
+ * CoreS3 captions have ASCII, symbol, and CJK glyphs. These helpers keep
+ * characters without a useful stand-in in UTF-8; curly quotes become straight
+ * ones, an em dash "--", and accented letters their plain ones where needed.
  */
+
+/* The Unicode code point at s and its byte length; -1 for malformed UTF-8.
+ * A malformed byte consumes one byte, so callers can stop at it safely. */
+int32_t muse_text_codepoint(const char *s, size_t *len);
+
+/* Copies as many complete, valid UTF-8 characters as fit, always NUL-
+ * terminating when cap is nonzero. Stops before malformed/incomplete input;
+ * returns the number of bytes copied. */
+size_t muse_text_copy_utf8(char *out, size_t cap, const char *src);
+
+/* Appends as many complete UTF-8 characters as fit; stops before malformed
+ * input and returns appended bytes. */
+size_t muse_text_append_utf8(char *dst, size_t cap, const char *src);
 
 /* The stand-in for the UTF-8 character at s into out, and its length (0 drops
  * the character); -1 to keep it. *len is the character's length in bytes. */

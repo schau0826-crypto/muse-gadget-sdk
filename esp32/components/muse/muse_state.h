@@ -56,11 +56,12 @@ float muse_state_level(void);
 void muse_state_set_progress(float progress);
 float muse_state_progress(void);
 
-/* Room for a page of reply text; longer captions are cut short. */
-#define MUSE_CAPTION_MAX 400
+/* Room for a page of reply text, including UTF-8 CJK characters. */
+#define MUSE_CAPTION_MAX 768
 
 void muse_state_set_caption(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-/* Copies the caption if it changed since *version; returns true on change. */
+/* Copies a complete-UTF-8 prefix if the caption changed since *version;
+ * returns true on change. */
 bool muse_state_caption(char *out, size_t out_len, uint32_t *version);
 
 /* How much reply text the screen shows at once, set by the UI: lines of up to

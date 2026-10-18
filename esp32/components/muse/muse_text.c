@@ -128,20 +128,78 @@ static const char LATIN[] =
     "NnNnNn_NnOoOoOo__RrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
 
 /* The code point at s, and its length in *len; -1 if it's broken. */
-static int32_t decode(const unsigned char *s, size_t *len)
+int32_t muse_text_codepoint(const char *text, size_t *len)
 {
-    if (s[0] >= 0x80 && s[0] < 0xC0) {
-        *len = 1;   /* a stray continuation byte */
+    const unsigned char *s = (const unsigned char *)text;
+    unsigned char first = s[0];
+    if (first < 0x80) {
+        *len = 1;
+        return first;
+    }
+    size_t n;
+    int32_t cp;
+    if (first >= 0xC2 && first <= 0xDF) {
+        n = 2;
+        cp = first & 0x1F;
+    } else if (first >= 0xE0 && first <= 0xEF) {
+        n = 3;
+        cp = first & 0x0F;
+    } else if (first >= 0xF0 && first <= 0xF4) {
+        n = 4;
+        cp = first & 0x07;
+    } else {
+        *len = 1;
         return -1;
     }
-    size_t n = s[0] >= 0xF0 ? 4 : s[0] >= 0xE0 ? 3 : s[0] >= 0xC0 ? 2 : 1;
-    int32_t cp = n == 1 ? s[0] : s[0] & (0x7F >> n);
-    size_t i = 1;
-    for (; i < n && (s[i] & 0xC0) == 0x80; i++) {
+    for (size_t i = 1; i < n; i++) {
+        if (!s[i] || (s[i] & 0xC0) != 0x80) {
+            *len = 1;
+            return -1;
+        }
         cp = cp << 6 | (s[i] & 0x3F);
     }
-    *len = i;
-    return i == n ? cp : -1;
+    if ((n == 3 && ((first == 0xE0 && s[1] < 0xA0) || (first == 0xED && s[1] >= 0xA0)))
+        || (n == 4 && ((first == 0xF0 && s[1] < 0x90) || (first == 0xF4 && s[1] >= 0x90)))) {
+        *len = 1;
+        return -1;
+    }
+    *len = n;
+    return cp;
+}
+
+size_t muse_text_copy_utf8(char *out, size_t cap, const char *src)
+{
+    if (!cap) {
+        return 0;
+    }
+    size_t copied = 0;
+    while (*src) {
+        size_t bytes;
+        int32_t cp = muse_text_codepoint(src, &bytes);
+        if (cp < 0) {
+            break;   /* never copy a partial or malformed character */
+        }
+        if (copied + bytes >= cap) {
+            break;
+        }
+        memmove(out + copied, src, bytes);   /* also permits in-place validation */
+        copied += bytes;
+        src += bytes;
+    }
+    out[copied] = '\0';
+    return copied;
+}
+
+size_t muse_text_append_utf8(char *dst, size_t cap, const char *src)
+{
+    size_t used = 0;
+    while (used < cap && dst[used]) {
+        used++;
+    }
+    if (used == cap) {
+        return 0;
+    }
+    return muse_text_copy_utf8(dst + used, cap - used, src);
 }
 
 static const char *stand_in(int32_t cp)
@@ -176,7 +234,7 @@ static const char *stand_in(int32_t cp)
 
 int muse_text_ascii(const char *s, size_t *len, char out[4])
 {
-    int32_t cp = decode((const unsigned char *)s, len);
+    int32_t cp = muse_text_codepoint(s, len);
     if (cp < 0x80) {
         return -1;   /* ASCII, or broken */
     }
@@ -221,7 +279,7 @@ const char *muse_text_showable(const char *text, char *buf, size_t cap)
     while (*p && !(*p & 0x80)) {
         p++;
     }
-    if (!*p || strlcpy(buf, text, cap) >= cap) {
+    if (!*p || muse_text_copy_utf8(buf, cap, text) != strlen(text)) {
         return text;
     }
     muse_text_to_ascii(buf, cap);
