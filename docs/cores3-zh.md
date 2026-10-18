@@ -14,6 +14,11 @@ MiMo 语音合成。仓库：`schau0826-crypto/muse-gadget-sdk`，分支 `cores3
 - **MiMo TTS**：回复通过小米 MiMo 的流式 TTS 朗读，配置项
   `CONFIG_MUSE_MIMO_TTS_API_KEY`、`MIMO_TTS_MODEL`、`MIMO_TTS_VOICE`、
   `MIMO_TTS_STYLE`（见 `esp32/components/muse/Kconfig`）。
+- **MiMo ASR**：按住 PWR 录音，松开后把 16 kHz PCM 编码为 WAV 发给
+  `mimo-v2.5-asr`（`CONFIG_MUSE_MIMO_ASR=y`，语言用
+  `CONFIG_MUSE_MIMO_ASR_LANGUAGE`），识别出的文本作为文本回合发给 Muse。
+  录音上限 10 秒，使用同一个 API key；识别失败时提示“没听清”。关闭该项时
+  录音仍按上游方式作为 voice note 发给 Muse 自己的 ASR。
 - **字幕流式**：回复文字随语音逐段显示。
 - CoreS3 的 sdkconfig 打开 `CONFIG_MUSE_CJK_FONT=y` 和
   `CONFIG_LV_FONT_FMT_TXT_LARGE=y`，后者用于超过 1 MB 的字体位图。

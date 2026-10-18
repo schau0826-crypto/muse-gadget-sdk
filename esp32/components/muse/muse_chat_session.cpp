@@ -70,6 +70,7 @@ extern "C" {
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_text.h"
+#include "muse_asr_mimo.h"
 #include "muse_tts_mimo.h"
 #include "muse_wifi.h"
 }
@@ -132,6 +133,10 @@ static_assert(MP3_BUF > MP3_POLL_ROOM + MP3_HOLD, "reads would stall with the MP
  */
 #define VOICE_NOTE 1
 #define NOTE_MAX_BYTES (MIC_RATE * 2 * 20) /* 20 s of 16 kHz PCM; Muse stops at 15 */
+#ifndef CONFIG_MUSE_MIMO_ASR
+#define CONFIG_MUSE_MIMO_ASR 0
+#endif
+#define ASR_MAX_BYTES (MIC_RATE * 2 * 10) /* 10 s of speech MiMo ASR takes */
 #define NOTE_PART_BYTES (DICT_CHUNK_BYTES / 4 * 3)   /* staged PCM that base64s to one body chunk */
 
 #define MAX_MSGS 8
@@ -233,6 +238,8 @@ struct turn_t {
     size_t chunk_len;
     uint8_t *note;           /* NOTE_PART_BYTES of 16 kHz PCM waiting for base64 */
     size_t note_len;
+    uint8_t *asr_pcm;        /* ASR_MAX_BYTES of 16 kHz PCM for MiMo ASR */
+    size_t asr_bytes;
     size_t pcm_bytes;        /* the note so far */
     size_t body_sent;
     char *texts;             /* MAX_MSGS * TEXT_MAX: each message's text as shown */
@@ -1009,12 +1016,13 @@ static bool turn_start(uint32_t gen, bool text)
             turn_finish();
         }
     }
-    uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note;
+    uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note, *asr_pcm = s_turn.asr_pcm;
     char *texts = s_turn.texts, *raw = s_turn.raw;
     s_turn = turn_t{};
     s_turn.chunk = chunk;
     s_turn.mp3 = mp3;
     s_turn.note = note;
+    s_turn.asr_pcm = asr_pcm;
     s_turn.texts = texts;
     s_turn.raw = raw;
     s_turn.gen = gen;
@@ -1038,6 +1046,11 @@ static void turn_begin(uint32_t gen)
         return;
     }
     if (VOICE_NOTE) {
+#if CONFIG_MUSE_MIMO_ASR
+        /* The recording goes to MiMo ASR on release, not to Muse. */
+        s_turn.phase = P_LISTEN;
+        return;
+#else
         if (!open_note()) {
             disconnect("chat open failed");
             turn_fail(MUSE_TR("CAN'T REACH MUSE", "连不上 Muse"));
@@ -1045,6 +1058,7 @@ static void turn_begin(uint32_t gen)
         }
         s_turn.phase = P_LISTEN;
         return;
+#endif
     }
     char path[64];
     snprintf(path, sizeof(path), "/api/voice/dictation?sample_rate_hz=%d", DICT_RATE);
@@ -1235,6 +1249,37 @@ static void post_chat(const char *text)
     emit(MUSE_HATCH_EV_HEARD, text);
     send_chat(text, "text");
 }
+
+#if CONFIG_MUSE_MIMO_ASR
+/* MiMo ASR: collects the press's PCM, transcribes it on release, then posts
+ * the text to the chat as a typed turn. */
+static bool record_note_asr(void)
+{
+    size_t room = ASR_MAX_BYTES - s_turn.asr_bytes;
+    size_t got = room ? xStreamBufferReceive(s_in, s_turn.asr_pcm + s_turn.asr_bytes, room & ~(size_t)1, 0) : 0;
+    if (got) {
+        s_turn.asr_bytes += got;
+    }
+    if (!s_turn.end_requested && s_turn.asr_bytes < ASR_MAX_BYTES) {
+        return true;
+    }
+    mark(M_RELEASE);
+    double secs = (double)s_turn.asr_bytes / (MIC_RATE * 2);
+    if (secs < 0.3) {
+        turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
+        return true;
+    }
+    ESP_LOGI(TAG, "MiMo ASR: %.2fs, %u bytes", secs, (unsigned)s_turn.asr_bytes);
+    const char *heard = muse_asr_transcribe(reinterpret_cast<const int16_t *>(s_turn.asr_pcm),
+                                            s_turn.asr_bytes / 2);
+    if (!heard || !*heard) {
+        turn_fail(MUSE_TR("DIDN'T CATCH THAT", "没听清，请再说一次"));
+        return true;
+    }
+    post_chat(heard);
+    return true;
+}
+#endif
 
 /* A typed turn: the text goes straight to the chat. */
 static void text_begin(const char *text)
@@ -2095,7 +2140,11 @@ static void hatch_task(void *arg)
         }
         bool sent = true;
         if (s_turn.phase == P_LISTEN) {
+#if CONFIG_MUSE_MIMO_ASR
+            sent = VOICE_NOTE ? record_note_asr() : pump_mic();
+#else
             sent = VOICE_NOTE ? record_note() : pump_mic();
+#endif
         }
         if (!sent) {
             drop_connection("send failed");
@@ -2167,6 +2216,9 @@ extern "C" void muse_hatch_start(void)
     s_turn.chunk = static_cast<uint8_t *>(psram_alloc(DICT_CHUNK_BYTES + sizeof(MUSE_HATCH_NOTE_TAIL)));
     s_turn.mp3 = static_cast<uint8_t *>(psram_alloc(MP3_BUF));
     s_turn.note = VOICE_NOTE ? static_cast<uint8_t *>(psram_alloc(NOTE_PART_BYTES)) : nullptr;
+#if CONFIG_MUSE_MIMO_ASR
+    s_turn.asr_pcm = static_cast<uint8_t *>(psram_alloc(ASR_MAX_BYTES));
+#endif
     s_turn.texts = static_cast<char *>(psram_alloc(MAX_MSGS * TEXT_MAX));   /* captions just stay untimed without it */
     s_turn.raw = static_cast<char *>(psram_alloc(MAX_MSGS * TEXT_MAX));     /* Markdown shows as it came without it */
     s_plain = static_cast<char *>(psram_alloc(TEXT_MAX));
@@ -2177,13 +2229,22 @@ extern "C" void muse_hatch_start(void)
         s.cap = NDJSON_LINE_MAX;
     }
     s_turn.tts_msg = -1;
+#if CONFIG_MUSE_MIMO_ASR
+    const bool asr_ok = s_turn.asr_pcm != nullptr;
+#else
+    const bool asr_ok = true;
+#endif
     /* Stack in PSRAM: TLS, Noise and the MP3 decoder (~16 KB of scratch) all run here. */
-    if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !s_pcm || !s_pcm16 ||
+    if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !asr_ok ||
+        !s_pcm || !s_pcm16 ||
         xTaskCreatePinnedToCoreWithCaps(hatch_task, "muse_chat", 48 * 1024, nullptr, 5, nullptr, 0,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "start failed");
     }
     muse_tts_init();
+#if CONFIG_MUSE_MIMO_ASR
+    muse_asr_init();
+#endif
 }
 
 extern "C" void muse_hatch_chat_connect(void)

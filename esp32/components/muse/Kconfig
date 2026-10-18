@@ -279,4 +279,21 @@ menu "Muse"
             Sent as the user message, e.g. a short description of the tone
             and pace. Empty sends none.
 
+    config MUSE_MIMO_ASR
+        bool "Transcribe push-to-talk with Xiaomi MiMo ASR"
+        depends on MUSE_HATCH
+        default n
+        help
+            Sends each push-to-talk recording to Xiaomi MiMo's speech
+            recognition (mimo-v2.5-asr) and posts the recognized text to
+            Muse as a typed turn. Uses the MiMo TTS API key above. Off: the
+            recording goes to Muse's own ASR as a voice note.
+
+    config MUSE_MIMO_ASR_LANGUAGE
+        string "MiMo ASR language (auto, zh, en)"
+        depends on MUSE_MIMO_ASR
+        default "zh"
+        help
+            Language hint for the recognizer, or auto to detect it.
+
 endmenu
